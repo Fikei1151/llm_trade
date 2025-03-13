@@ -4,7 +4,6 @@ import numpy as np
 import google.generativeai as genai
 import threading
 import time
-from datetime import datetime
 
 # ตั้งค่า Gemini API
 GOOGLE_API_KEY = "AIzaSyD-k1gCMg6sDKrEc4nnRDhJ3tPGtH2tyTY"
@@ -13,12 +12,12 @@ model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
 
 # เริ่มต้น MT5
 print("พยายามเชื่อมต่อ MT5...")
-if not mt5.initialize(login=2100542414, password="Fikree24@", server="IUXMarkets-Demo"):
+if not mt5.initialize(login=2100542874, password="Fikree24@", server="IUXMarkets-Demo"):
     print("การเชื่อมต่อ MT5 ล้มเหลว", mt5.last_error())
     quit()
 print("เชื่อมต่อ MT5 สำเร็จ")
 
-# ฟังก์ชันคำนวณตัวชี้วัด (เพิ่ม Stochastic และ ADX)
+# ฟังก์ชันคำนวณตัวชี้วัด
 def calculate_indicators(data):
     data['MA20'] = data['Close'].rolling(window=20).mean()
     data['RSI'] = compute_rsi(data['Close'], 14)
@@ -31,22 +30,6 @@ def calculate_indicators(data):
     data['EMA26'] = data['Close'].ewm(span=26, adjust=False).mean()
     data['MACD'] = data['EMA12'] - data['EMA26']
     data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # Stochastic (14,3,3)
-    low14 = data['Low'].rolling(window=14).min()
-    high14 = data['High'].rolling(window=14).max()
-    data['%K'] = 100 * (data['Close'] - low14) / (high14 - low14)
-    data['Stochastic'] = data['%K'].rolling(window=3).mean()
-    
-    # ADX (14)
-    data['+DM'] = np.where((data['High'].diff() > data['Low'].diff()) & (data['High'].diff() > 0), data['High'].diff(), 0)
-    data['-DM'] = np.where((data['Low'].diff() < data['High'].diff()) & (data['Low'].diff() > 0), data['Low'].diff(), 0)
-    tr = compute_atr(data, 14)
-    data['+DI'] = 100 * data['+DM'].rolling(window=14).mean() / tr
-    data['-DI'] = 100 * data['-DM'].rolling(window=14).mean() / tr
-    dx = 100 * np.abs(data['+DI'] - data['-DI']) / (data['+DI'] + data['-DI'])
-    data['ADX'] = dx.rolling(window=14).mean()
-    
     return data
 
 def compute_rsi(data, window):
@@ -63,8 +46,8 @@ def compute_atr(data, window):
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.rolling(window=window).mean()
 
-# ดึงข้อมูลเรียลไทม์ (ปรับ bars เป็น 30 สำหรับ 5 วัน)
-def get_realtime_data(symbol, timeframe=mt5.TIMEFRAME_H4, bars=30):
+# ดึงข้อมูลเรียลไทม์ (1 สัปดาห์ = 42 bars บน H4)
+def get_realtime_data(symbol, timeframe=mt5.TIMEFRAME_H4, bars=42):
     if not mt5.symbol_select(symbol, True):
         print(f"Failed to select symbol: {symbol}")
         return pd.DataFrame()
@@ -85,46 +68,44 @@ def get_open_orders(symbol):
                  "price_open": pos.price_open, "sl": pos.sl, "tp": pos.tp, "profit": pos.profit} for pos in positions]
     return []
 
-# Prompt 1: วิเคราะห์ข้อมูลตลาดสำหรับการเปิดออเดอร์ใหม่ (ปรับเพิ่ม Stochastic และ ADX)
+# Prompt 1: วิเคราะห์ข้อมูลตลาด (สายซิ่ง - รวดเร็วและเน้นโมเมนตัม)
 def analyze_market(data, open_orders):
     latest_data = data.iloc[-1]
     previous_data = data.iloc[-2] if len(data) > 1 else latest_data
     trend = "Uptrend" if latest_data['Close'] > latest_data['MA20'] else "Downtrend"
     orders_info = "\n".join([f"Order {o['ticket']}: {o['type']} at {o['price_open']}, SL: {o['sl']}, TP: {o['tp']}, Profit: {o['profit']}" for o in open_orders])
     prompt_analysis = (
-        f"Analyze the following H4 market data for XAUUSD (5-day short-term focus, Monday to Friday):\n"
-        f"Latest Data: Close: {latest_data['Close']}, MA20: {latest_data['MA20']}, RSI: {latest_data['RSI']}, ATR: {latest_data['ATR']}, "
-        f"Stochastic: {latest_data['Stochastic']}, ADX: {latest_data['ADX']}\n"
+        f"Analyze the following H4 market data for XAUEUR.iux (aggressive short-term focus):\n"
+        f"Latest Data: Close: {latest_data['Close']}, MA20: {latest_data['MA20']}, RSI: {latest_data['RSI']}, ATR: {latest_data['ATR']}\n"
         f"Previous Close: {previous_data['Close']}\n"
         f"Bollinger Bands: Upper: {latest_data['BB_Upper']}, Middle: {latest_data['BB_Middle']}, Lower: {latest_data['BB_Lower']}\n"
         f"MACD: {latest_data['MACD']}, Signal: {latest_data['Signal']}\n"
         f"Open Orders:\n{orders_info if open_orders else 'No open orders'}\n"
-        f"Determine:\n"
+        f"Determine for aggressive trading:\n"
         f"1. Trend: Uptrend/Downtrend based on Close vs MA20 and MACD direction.\n"
-        f"2. Volatility: High (>1.5*average ATR) or Low.\n"
-        f"3. Momentum: Strong (MACD diverging from Signal, Stochastic > 50) or Weak (MACD converging, Stochastic < 50).\n"
-        f"4. Trend Strength: Strong (ADX > 25) or Weak (ADX < 25).\n"
-        f"5. Potential reversal: Price near BB_Upper/BB_Lower with RSI > 70 or < 30, or Stochastic > 80 or < 20."
+        f"2. Volatility: High (>1.5*average ATR) or Low - prioritize high volatility for quick moves.\n"
+        f"3. Momentum: Strong (MACD diverging from Signal rapidly) or Weak - focus on strong momentum.\n"
+        f"4. Entry Opportunity: Price breaking BB_Upper (sell) or BB_Lower (buy) for breakout trades."
     )
     response = model.generate_content(prompt_analysis)
     return response.text
 
-# Prompt 2: ตัดสินใจเปิดออเดอร์ใหม่ (ปรับเงื่อนไขให้เข้มงวดขึ้น)
+# Prompt 2: ตัดสินใจเปิดออเดอร์ใหม่ (สายซิ่ง - เน้น breakout และโมเมนตัมสูง)
 def llm_decision_new_order(analysis, data, open_orders):
     latest_data = data.iloc[-1]
     prompt_decision = (
-        f"Based on this H4 market analysis for XAUUSD (5-day aggressive strategy, Monday to Friday):\n{analysis}\n"
+        f"Based on this H4 market analysis for XAUEUR.iux (aggressive breakout strategy):\n{analysis}\n"
         f"Current Price: {latest_data['Close']}, ATR: {latest_data['ATR']}\n"
-        f"Short-term Trading Strategy for Opening New Orders:\n"
-        f"- Open Buy: If Uptrend (Price > MA20, MACD > Signal), Strong Trend (ADX > 25), Momentum Strong (Stochastic > 50), RSI < 70, price near BB_Lower or Middle, no conflicting sell orders.\n"
-        f"- Open Sell: If Downtrend (Price < MA20, MACD < Signal), Strong Trend (ADX > 25), Momentum Weak (Stochastic < 50), RSI > 30, price near BB_Upper or Middle, no conflicting buy orders.\n"
-        f"- Hold: If no clear entry signal, weak trend (ADX < 25), or conflicting orders exist.\n"
+        f"Aggressive Trading Strategy for High Risk and High Reward:\n"
+        f"- Open Buy: If Uptrend (Price > MA20, MACD > Signal), Price breaks BB_Lower or strong momentum (MACD diverging), no conflicting sell orders.\n"
+        f"- Open Sell: If Downtrend (Price < MA20, MACD < Signal), Price breaks BB_Upper or strong momentum (MACD diverging), no conflicting buy orders.\n"
+        f"- Hold: If no breakout (Price within BB_Middle) or weak momentum (MACD near Signal).\n"
         f"Provide a decision: 'open_buy', 'open_sell', or 'hold', and briefly explain why."
     )
     response = model.generate_content(prompt_decision)
     return response.text
 
-# Prompt 3: วิเคราะห์และตัดสินใจสำหรับออเดอร์ที่เปิดอยู่ (ปรับเงื่อนไขให้เหมาะสม)
+# Prompt 3: วิเคราะห์และตัดสินใจสำหรับออเดอร์ที่เปิดอยู่ (สายซิ่ง - ปิดเร็วเมื่อได้กำไรหรือแนวโน้มเปลี่ยน)
 def analyze_open_orders(data, open_orders):
     if not open_orders:
         return "No open orders to analyze."
@@ -132,21 +113,20 @@ def analyze_open_orders(data, open_orders):
     latest_data = data.iloc[-1]
     orders_info = "\n".join([f"Order {o['ticket']}: {o['type']} at {o['price_open']}, SL: {o['sl']}, TP: {o['tp']}, Profit: {o['profit']}" for o in open_orders])
     prompt_open_orders = (
-        f"Analyze the following H4 market data and open orders for XAUUSD (5-day focus):\n"
-        f"Latest Data: Close: {latest_data['Close']}, MA20: {latest_data['MA20']}, RSI: {latest_data['RSI']}, ATR: {latest_data['ATR']}, "
-        f"Stochastic: {latest_data['Stochastic']}, ADX: {latest_data['ADX']}\n"
+        f"Analyze the following H4 market data and open orders for XAUEUR.iux:\n"
+        f"Latest Data: Close: {latest_data['Close']}, MA20: {latest_data['MA20']}, RSI: {latest_data['RSI']}, ATR: {latest_data['ATR']}\n"
         f"Bollinger Bands: Upper: {latest_data['BB_Upper']}, Middle: {latest_data['BB_Middle']}, Lower: {latest_data['BB_Lower']}\n"
         f"MACD: {latest_data['MACD']}, Signal: {latest_data['Signal']}\n"
         f"Open Orders:\n{orders_info}\n"
-        f"Strategy for Managing Open Orders:\n"
-        f"- Close Order: If profit > 2*ATR, loss > 1.5*ATR, or trend reverses (e.g., Buy order but Price < MA20 and MACD < Signal and ADX < 25; Sell order but Price > MA20 and MACD > Signal and ADX < 25).\n"
-        f"- Hold: If profit < 2*ATR, loss < 1.5*ATR, and trend remains strong (ADX > 25) with no reversal signal.\n"
+        f"Aggressive Strategy for Managing Open Orders:\n"
+        f"- Close Order: If profit > 1*ATR (quick profit-taking) or trend reverses sharply (Buy but Price < MA20 and MACD < Signal; Sell but Price > MA20 and MACD > Signal).\n"
+        f"- Hold: If profit < 1*ATR and trend still supports the order direction with strong momentum.\n"
         f"Provide a decision for each order: 'close_order' or 'hold', and briefly explain why."
     )
     response = model.generate_content(prompt_open_orders)
     return response.text
 
-# ส่งคำสั่งเทรดหรือปิดออเดอร์ (ปรับ SL/TP ตาม ADX)
+# ส่งคำสั่งเทรดหรือปิดออเดอร์ (สายซิ่ง: SL = 1.5*ATR, TP = 3*ATR)
 def execute_trade(symbol, action, data, open_orders, volume=0.1):
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
@@ -156,13 +136,8 @@ def execute_trade(symbol, action, data, open_orders, volume=0.1):
     if 'open' in action:
         price = tick.ask if 'buy' in action else tick.bid
         atr = data.iloc[-1]['ATR']
-        adx = data.iloc[-1]['ADX']
-        if adx > 25:  # แนวโน้มแข็งแกร่ง
-            sl = price - atr * 1.5 if 'buy' in action else price + atr * 1.5
-            tp = price + atr * 3 if 'buy' in action else price - atr * 3
-        else:  # แนวโน้มอ่อน
-            sl = price - atr * 1 if 'buy' in action else price + atr * 1
-            tp = price + atr * 2 if 'buy' in action else price - atr * 2
+        sl = price - atr * 1.5 if 'buy' in action else price + atr * 1.5  # SL = 1.5*ATR
+        tp = price + atr * 3 if 'buy' in action else price - atr * 3      # TP = 3*ATR
 
         order_type = mt5.ORDER_TYPE_BUY if 'buy' in action else mt5.ORDER_TYPE_SELL
         request = {
@@ -175,7 +150,7 @@ def execute_trade(symbol, action, data, open_orders, volume=0.1):
             "tp": tp,
             "deviation": 10,
             "magic": 123456,
-            "comment": "Automated Trade",
+            "comment": "Aggressive Trade",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
@@ -202,7 +177,7 @@ def execute_trade(symbol, action, data, open_orders, volume=0.1):
                 "price": price,
                 "deviation": 10,
                 "magic": 123456,
-                "comment": "Close Automated Trade",
+                "comment": "Close Aggressive Trade",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -212,27 +187,17 @@ def execute_trade(symbol, action, data, open_orders, volume=0.1):
             else:
                 print(f"Failed to close order: Ticket {ticket} - Error: {result.retcode}, Comment: {result.comment}")
 
-# ฟังก์ชันตรวจสอบวันเทรด (จันทร์ถึงศุกร์)
-def is_trading_day():
-    current_day = datetime.now().weekday()  # 0 = Monday, 6 = Sunday
-    return 0 <= current_day <= 4  # Monday to Friday
-
-# รันบอททุก 5 นาที (ปรับให้เทรดเฉพาะจันทร์-ศุกร์)
+# รันบอททุก 3 นาที (สายซิ่ง)
 running = True
 
 def run_trading_bot():
-    symbol = "XAUUSD.iux"
+    symbol = "XAUEUR.iux"
     print(f"Account Info: {mt5.account_info()}")  # ตรวจสอบบัญชี
     while running:
-        if not is_trading_day():
-            print(f"Non-trading day at {time.ctime()}, sleeping for 24 hours.")
-            time.sleep(86400)  # Sleep for 24 hours if weekend
-            continue
-
-        data = get_realtime_data(symbol, bars=30)
+        data = get_realtime_data(symbol, bars=42)
         if data.empty:
             print(f"No data for {symbol} at {time.ctime()}. Retrying later.")
-            time.sleep(300)
+            time.sleep(180)  # รอ 3 นาที
             continue
 
         data = calculate_indicators(data)
@@ -277,7 +242,7 @@ def run_trading_bot():
             if decision == 'close_order':
                 execute_trade(symbol, 'close_order', data, [o for o in open_orders if o['ticket'] == ticket])
 
-        time.sleep(300)
+        time.sleep(180)  # รันทุก 3 นาที
 
 bot_thread = threading.Thread(target=run_trading_bot)
 bot_thread.start()
